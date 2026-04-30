@@ -1,0 +1,134 @@
+{
+  "run_id": "20260430_121734",
+  "metadata": {
+    "input": "test_images",
+    "model_path": "model/posture_level_model.joblib",
+    "engines": "yolo",
+    "yolo_models": "yolo11n-pose.pt,yolo11s-pose.pt,yolo11m-pose.pt",
+    "mediapipe_complexities": "0,1,2",
+    "warmup_runs": 1,
+    "records_count": 9,
+    "images_count": 3
+  },
+  "summary": [
+    {
+      "engine": "yolo",
+      "model_name": "yolo11m-pose.pt",
+      "samples": 3,
+      "detected_samples": 3,
+      "valid_posture_samples": 3,
+      "error_count": 0,
+      "avg_latency_ms": 294.638,
+      "median_latency_ms": 233.614,
+      "detection_rate": 1.0,
+      "valid_posture_rate": 1.0
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11n-pose.pt",
+      "samples": 3,
+      "detected_samples": 3,
+      "valid_posture_samples": 3,
+      "error_count": 0,
+      "avg_latency_ms": 77.585,
+      "median_latency_ms": 87.275,
+      "detection_rate": 1.0,
+      "valid_posture_rate": 1.0
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11s-pose.pt",
+      "samples": 3,
+      "detected_samples": 3,
+      "valid_posture_samples": 3,
+      "error_count": 0,
+      "avg_latency_ms": 124.024,
+      "median_latency_ms": 115.379,
+      "detection_rate": 1.0,
+      "valid_posture_rate": 1.0
+    }
+  ],
+  "records": [
+    {
+      "engine": "yolo",
+      "model_name": "yolo11n-pose.pt",
+      "image_path": "test_images/img-1.jpg",
+      "detected_pose": 1,
+      "inference_ms": 87.465,
+      "posture_level": 2,
+      "error": ""
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11n-pose.pt",
+      "image_path": "test_images/img-2.jpg",
+      "detected_pose": 1,
+      "inference_ms": 87.275,
+      "posture_level": 2,
+      "error": ""
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11n-pose.pt",
+      "image_path": "test_images/sample.jpg",
+      "detected_pose": 1,
+      "inference_ms": 58.014,
+      "posture_level": 2,
+      "error": ""
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11s-pose.pt",
+      "image_path": "test_images/img-1.jpg",
+      "detected_pose": 1,
+      "inference_ms": 115.379,
+      "posture_level": 2,
+      "error": ""
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11s-pose.pt",
+      "image_path": "test_images/img-2.jpg",
+      "detected_pose": 1,
+      "inference_ms": 161.683,
+      "posture_level": 2,
+      "error": ""
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11s-pose.pt",
+      "image_path": "test_images/sample.jpg",
+      "detected_pose": 1,
+      "inference_ms": 95.009,
+      "posture_level": 2,
+      "error": ""
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11m-pose.pt",
+      "image_path": "test_images/img-1.jpg",
+      "detected_pose": 1,
+      "inference_ms": 233.614,
+      "posture_level": 2,
+      "error": ""
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11m-pose.pt",
+      "image_path": "test_images/img-2.jpg",
+      "detected_pose": 1,
+      "inference_ms": 423.02,
+      "posture_level": 2,
+      "error": ""
+    },
+    {
+      "engine": "yolo",
+      "model_name": "yolo11m-pose.pt",
+      "image_path": "test_images/sample.jpg",
+      "detected_pose": 1,
+      "inference_ms": 227.281,
+      "posture_level": 2,
+      "error": ""
+    }
+  ]
+}

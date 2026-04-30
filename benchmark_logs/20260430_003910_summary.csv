@@ -1,4 +1,0 @@
-engine,model_name,samples,detected_samples,valid_posture_samples,error_count,avg_latency_ms,median_latency_ms,detection_rate,valid_posture_rate
-yolo,yolo11m-pose.pt,1,1,1,0,161.496,161.496,1.0,1.0
-yolo,yolo11n-pose.pt,1,1,1,0,41.918,41.918,1.0,1.0
-yolo,yolo11s-pose.pt,1,1,1,0,83.757,83.757,1.0,1.0
