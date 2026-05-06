@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import platform
+import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,12 +15,13 @@ from time import perf_counter
 import cv2
 import joblib
 import numpy as np
-from ultralytics import YOLO
 import mediapipe as mp
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
+import torch
+from torchvision.models.detection import KeypointRCNN_ResNet50_FPN_Weights
+from torchvision.models.detection import keypointrcnn_resnet50_fpn
+from ultralytics import YOLO
 
-
+from benchmark_charts import save_benchmark_figure
 from predict_posture_images import collect_images
 from predict_posture_images import feature_vector_from_keypoints
 
@@ -94,27 +98,24 @@ class MediaPipePoseRunner:
         min_tracking_confidence: float,
     ) -> None:
         self.engine = "mediapipe"
-        self.model_name = f"blazepose-c{complexity}"
+        self.model_name = f"pose_landmarker-{mediapipe_model_variant(complexity)}"
         self._min_vis = min(min_tracking_confidence, 0.5)
+        self.model_path = ensure_mediapipe_model(model_path, complexity)
 
-        base_options = mp_python.BaseOptions(model_asset_path=str(model_path))
-        if complexity <= 0:
-            preset = mp_vision.PoseLandmarkerOptions.Preset.LITE
-        elif complexity == 1:
-            preset = mp_vision.PoseLandmarkerOptions.Preset.FULL
-        else:
-            preset = mp_vision.PoseLandmarkerOptions.Preset.HEAVY
-
-        options = mp_vision.PoseLandmarkerOptions(
+        base_options = mp.tasks.BaseOptions(
+            model_asset_path=str(self.model_path),
+            delegate=mp.tasks.BaseOptions.Delegate.CPU,
+        )
+        options = mp.tasks.vision.PoseLandmarkerOptions(
             base_options=base_options,
-            running_mode=mp_vision.RunningMode.IMAGE,
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
+            num_poses=1,
             min_pose_detection_confidence=min_detection_confidence,
             min_pose_presence_confidence=min_tracking_confidence,
             min_tracking_confidence=min_tracking_confidence,
             output_segmentation_masks=False,
-            model_complexity=preset,
         )
-        self._landmarker = mp_vision.PoseLandmarker.create_from_options(options)
+        self._landmarker = mp.tasks.vision.PoseLandmarker.create_from_options(options)
 
     def _choose_side_point(
         self,
@@ -132,9 +133,7 @@ class MediaPipePoseRunner:
 
     def infer(self, image_bgr: np.ndarray) -> tuple[np.ndarray | None, float]:
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        mp_image = mp_vision.MPImage(
-            image_format=mp_vision.ImageFormat.SRGB, data=image_rgb
-        )
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
 
         start = perf_counter()
         result = self._landmarker.detect(mp_image)
@@ -201,13 +200,126 @@ class MediaPipePoseRunner:
         return float(np.degrees(np.arccos(cos_theta)))
 
     def close(self) -> None:
+        self._landmarker.close()
+
+
+class TorchvisionPoseRunner:
+    def __init__(self, model_name: str, score_threshold: float) -> None:
+        if model_name != "keypointrcnn_resnet50_fpn":
+            raise ValueError(
+                f"Unsupported torchvision pose model: {model_name}. "
+                "Supported: keypointrcnn_resnet50_fpn"
+            )
+
+        self.engine = "torchvision"
+        self.model_name = model_name
+        self.score_threshold = score_threshold
+        self.device = torch.device("cpu")
+        self.weights = KeypointRCNN_ResNet50_FPN_Weights.DEFAULT
+        torchvision_cache_dir = Path("models") / "torchvision_cache"
+        torchvision_cache_dir.mkdir(parents=True, exist_ok=True)
+        torch.hub.set_dir(str(torchvision_cache_dir))
+        self.model = keypointrcnn_resnet50_fpn(weights=self.weights, progress=True)
+        self.model.to(self.device)
+        self.model.eval()
+
+    def infer(self, image_bgr: np.ndarray) -> tuple[np.ndarray | None, float]:
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        image_tensor = (
+            torch.from_numpy(image_rgb).permute(2, 0, 1).to(dtype=torch.float32) / 255.0
+        )
+
+        start = perf_counter()
+        with torch.inference_mode():
+            predictions = self.model([image_tensor.to(self.device)])
+        elapsed_ms = (perf_counter() - start) * 1000.0
+
+        if not predictions:
+            return None, elapsed_ms
+        prediction = predictions[0]
+        scores = prediction.get("scores")
+        keypoints = prediction.get("keypoints")
+        if scores is None or keypoints is None or len(scores) == 0 or len(keypoints) == 0:
+            return None, elapsed_ms
+
+        best_index = int(torch.argmax(scores).item())
+        best_score = float(scores[best_index].item())
+        if best_score < self.score_threshold:
+            return None, elapsed_ms
+
+        keypoints_xyv = keypoints[best_index].detach().cpu().numpy()
+        points_xy = keypoints_xyv[:, :2].astype(np.float64)
+        points_conf = np.clip(keypoints_xyv[:, 2].astype(np.float64), 0.0, 1.0)
+        feature_vec = feature_vector_from_keypoints(points_xy, points_conf)
+        return feature_vec, elapsed_ms
+
+    def close(self) -> None:
         return None
+
+
+def mediapipe_model_variant(complexity: int) -> str:
+    if complexity <= 0:
+        return "lite"
+    if complexity == 1:
+        return "full"
+    return "heavy"
+
+
+def mediapipe_model_url(complexity: int) -> str:
+    variant = mediapipe_model_variant(complexity)
+    return (
+        "https://storage.googleapis.com/mediapipe-models/"
+        f"pose_landmarker/pose_landmarker_{variant}/float16/latest/"
+        f"pose_landmarker_{variant}.task"
+    )
+
+
+def resolve_mediapipe_model_path(base_path: Path, complexity: int) -> Path:
+    variant = mediapipe_model_variant(complexity)
+    variant_filename = f"pose_landmarker_{variant}.task"
+    if base_path.suffix == ".task":
+        if base_path.exists():
+            return base_path
+        if base_path.name.startswith("pose_landmarker_"):
+            return base_path.with_name(variant_filename)
+        return base_path
+    return base_path / variant_filename
+
+
+def ensure_mediapipe_model(base_path: Path, complexity: int) -> Path:
+    model_path = resolve_mediapipe_model_path(base_path, complexity)
+    if model_path.exists():
+        return model_path
+
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model_url = mediapipe_model_url(complexity)
+    try:
+        urllib.request.urlretrieve(model_url, model_path)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Cannot initialize MediaPipe pose model. "
+            f"Failed to download {model_url} to {model_path}. "
+            "Download the .task file manually or re-run with network access."
+        ) from exc
+    return model_path
+
+
+def get_mediapipe_runtime_error() -> str | None:
+    if platform.system() != "Darwin":
+        return None
+    if os.environ.get("POSTURE_ALLOW_UNSTABLE_MEDIAPIPE") == "1":
+        return None
+    return (
+        "MediaPipe Pose Landmarker is unstable in the current macOS environment and "
+        "can terminate the whole process. Use YOLO-only comparison on this machine, "
+        "or set POSTURE_ALLOW_UNSTABLE_MEDIAPIPE=1 if you want to try it anyway."
+    )
 
 
 def build_runners(
     args: argparse.Namespace,
-) -> list[YOLOPoseRunner | MediaPipePoseRunner]:
-    runners: list[YOLOPoseRunner | MediaPipePoseRunner] = []
+) -> list[YOLOPoseRunner | MediaPipePoseRunner | TorchvisionPoseRunner]:
+    runners: list[YOLOPoseRunner | MediaPipePoseRunner | TorchvisionPoseRunner] = []
     enabled_engines = {
         engine.strip().lower() for engine in args.engines.split(",") if engine.strip()
     }
@@ -219,24 +331,37 @@ def build_runners(
             runners.append(YOLOPoseRunner(model_name=model_name, conf=args.yolo_conf))
 
     if "mediapipe" in enabled_engines:
-        for complexity_str in [
-            value.strip()
-            for value in args.mediapipe_complexities.split(",")
-            if value.strip()
+        mediapipe_runtime_error = get_mediapipe_runtime_error()
+        if mediapipe_runtime_error is not None:
+            if runners:
+                print(f"[WARN] Skipping MediaPipe: {mediapipe_runtime_error}")
+            else:
+                raise RuntimeError(mediapipe_runtime_error)
+        else:
+            for complexity_str in [
+                value.strip()
+                for value in args.mediapipe_complexities.split(",")
+                if value.strip()
+            ]:
+                runners.append(
+                    MediaPipePoseRunner(
+                        model_path=args.mediapipe_model_path,
+                        complexity=int(complexity_str),
+                        min_detection_confidence=args.mediapipe_min_detection_conf,
+                        min_tracking_confidence=args.mediapipe_min_tracking_conf,
+                    )
+                )
+
+    if "torchvision" in enabled_engines:
+        for model_name in [
+            model.strip()
+            for model in args.torchvision_models.split(",")
+            if model.strip()
         ]:
             runners.append(
-                MediaPipePoseRunner(
-                    complexity=int(complexity_str),
-                    min_detection_confidence=args.mediapipe_min_detection_conf,
-                    min_tracking_confidence=args.mediapipe_min_tracking_conf,
-                )
-            )
-            runners.append(
-                MediaPipePoseRunner(
-                    model_path=args.mediapipe_model_path,
-                    complexity=int(complexity_str),
-                    min_detection_confidence=args.mediapipe_min_detection_conf,
-                    min_tracking_confidence=args.mediapipe_min_tracking_conf,
+                TorchvisionPoseRunner(
+                    model_name=model_name,
+                    score_threshold=args.torchvision_score_threshold,
                 )
             )
 
@@ -259,7 +384,7 @@ def classify_level(
 
 
 def run_warmup(
-    runner: YOLOPoseRunner | MediaPipePoseRunner,
+    runner: YOLOPoseRunner | MediaPipePoseRunner | TorchvisionPoseRunner,
     warmup_image: np.ndarray,
     warmup_runs: int,
 ) -> None:
@@ -415,6 +540,7 @@ def benchmark(args: argparse.Namespace) -> None:
         "model_path": str(args.model_path),
         "engines": args.engines,
         "yolo_models": args.yolo_models,
+        "torchvision_models": args.torchvision_models,
         "mediapipe_complexities": args.mediapipe_complexities,
         "warmup_runs": args.warmup_runs,
         "records_count": len(records),
@@ -427,6 +553,12 @@ def benchmark(args: argparse.Namespace) -> None:
         summaries=summaries,
         metadata=metadata,
     )
+    chart_path = args.log_dir / f"{run_id}_charts.png"
+    try:
+        save_benchmark_figure(details_path=details_path, output_path=chart_path)
+        print(f"Saved chart: {chart_path}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] Failed to save chart image: {exc}")
     print(f"Saved summary: {summary_path}")
     print(f"Saved details: {details_path}")
 
@@ -447,17 +579,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--engines",
         type=str,
-        default="yolo,mediapipe",
-        help="Comma-separated engines to run. Supported: yolo, mediapipe.",
+        default="yolo,torchvision",
+        help="Comma-separated engines to run. Supported: yolo, torchvision, mediapipe.",
     )
     parser.add_argument(
         "--yolo-models",
         type=str,
-        default="yolo11n-pose.pt,yolo11s-pose.pt,yolo11m-pose.pt",
+        default="yolo11n-pose.pt",
         help="Comma-separated YOLO pose model names or paths.",
     )
     parser.add_argument(
         "--yolo-conf", type=float, default=0.25, help="YOLO confidence threshold."
+    )
+    parser.add_argument(
+        "--torchvision-models",
+        type=str,
+        default="keypointrcnn_resnet50_fpn",
+        help="Comma-separated torchvision pose models.",
+    )
+    parser.add_argument(
+        "--torchvision-score-threshold",
+        type=float,
+        default=0.75,
+        help="Torchvision person detection score threshold.",
     )
     parser.add_argument(
         "--mediapipe-complexities",
@@ -481,7 +625,10 @@ def parse_args() -> argparse.Namespace:
         "--mediapipe-model-path",
         type=Path,
         default=Path("models") / "pose_landmarker_full.task",
-        help="Path to MediaPipe pose_landmarker .task model file.",
+        help=(
+            "Path to a MediaPipe .task file or a directory for cached pose_landmarker "
+            "models. Missing files are downloaded automatically."
+        ),
     )
 
     parser.add_argument(
